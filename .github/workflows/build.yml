@@ -66,24 +66,33 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Read package version
+        id: package_version
+        run: echo "version=$(node -p \"require('./package.json').version\")" >> $env:GITHUB_OUTPUT
+
       - name: Build renderer
         run: npm run build:renderer
 
       - name: Package Electron app (release)
         run: npm run make -- --platform=win32 --arch=x64
 
-      - name: Archive packaged output
+      - name: Collect release artifacts
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path artifacts -Force | Out-Null
           Compress-Archive -Path out\make\* -DestinationPath artifacts\invoice-merger-win.zip -Force
+          $exe = Get-ChildItem -Path "out/make/squirrel.windows/x64" -Filter *.exe | Select-Object -First 1
+          if (-not $exe) { throw "Installer .exe not found in out/make/squirrel.windows/x64" }
+          Copy-Item $exe.FullName "artifacts/InvoiceMergerSetup-${{ steps.package_version.outputs.version }}.exe" -Force
 
-      - name: Publish release artifacts
+      - name: Publish release artifacts via Electron Forge
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
         run: npm run publish -- --platform=win32 --arch=x64
 
-      - name: Upload build zip to release
+      - name: Upload installers to release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/invoice-merger-win.zip
+          files: |
+            artifacts/invoice-merger-win.zip
+            artifacts/InvoiceMergerSetup-${{ steps.package_version.outputs.version }}.exe
