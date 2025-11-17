@@ -49,13 +49,17 @@ jobs:
           name: invoice-merger-windows
           path: artifacts/invoice-merger-win.zip
 
-  publish:
+  release:
     runs-on: windows-latest
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -70,11 +74,42 @@ jobs:
         id: package_version
         run: echo "version=$(node -p \"require('./package.json').version\")" >> $env:GITHUB_OUTPUT
 
+      - name: Ensure release tag exists
+        id: ensure_tag
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const version = '${{ steps.package_version.outputs.version }}';
+            const tag = `v${version}`;
+            try {
+              await github.rest.git.getRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: `tags/${tag}`,
+              });
+              core.info(`Tag ${tag} already exists`);
+            } catch (error) {
+              await github.rest.git.createRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: `refs/tags/${tag}`,
+                sha: context.sha,
+              });
+              core.info(`Created tag ${tag}`);
+            }
+            core.setOutput('tag', tag);
+
       - name: Build renderer
         run: npm run build:renderer
 
       - name: Package Electron app (release)
         run: npm run make -- --platform=win32 --arch=x64
+
+      - name: Publish release artifacts via Electron Forge
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run publish -- --platform=win32 --arch=x64
 
       - name: Collect release artifacts
         shell: pwsh
@@ -85,14 +120,10 @@ jobs:
           if (-not $exe) { throw "Installer .exe not found in out/make/squirrel.windows/x64" }
           Copy-Item $exe.FullName "artifacts/InvoiceMergerSetup-${{ steps.package_version.outputs.version }}.exe" -Force
 
-      - name: Publish release artifacts via Electron Forge
-        env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
-        run: npm run publish -- --platform=win32 --arch=x64
-
       - name: Upload installers to release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.ensure_tag.outputs.tag }}
           files: |
             artifacts/invoice-merger-win.zip
             artifacts/InvoiceMergerSetup-${{ steps.package_version.outputs.version }}.exe
