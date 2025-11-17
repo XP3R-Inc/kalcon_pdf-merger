@@ -11,6 +11,9 @@ jobs:
   open-issue:
     if: ${{ github.event.workflow_run.conclusion == 'failure' }}
     runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
     steps:
       - name: Create GitHub Issue
         uses: actions/github-script@v7

@@ -71,8 +71,17 @@ jobs:
         run: npm ci
 
       - name: Read package version
-        id: package_version
-        run: echo "version=$(node -p \"require('./package.json').version\")" >> $env:GITHUB_OUTPUT
+        id: build_package_version
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+      - name: Read package version
+        id: release_package_version
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          echo "version=$version" >> $env:GITHUB_OUTPUT
 
       - name: Ensure release tag exists
         id: ensure_tag
@@ -80,7 +89,7 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const version = '${{ steps.package_version.outputs.version }}';
+            const version = '${{ steps.release_package_version.outputs.version }}';
             const tag = `v${version}`;
             try {
               await github.rest.git.getRef({
@@ -118,7 +127,7 @@ jobs:
           Compress-Archive -Path out\make\* -DestinationPath artifacts\invoice-merger-win.zip -Force
           $exe = Get-ChildItem -Path "out/make/squirrel.windows/x64" -Filter *.exe | Select-Object -First 1
           if (-not $exe) { throw "Installer .exe not found in out/make/squirrel.windows/x64" }
-          Copy-Item $exe.FullName "artifacts/InvoiceMergerSetup-${{ steps.package_version.outputs.version }}.exe" -Force
+          Copy-Item $exe.FullName "artifacts/InvoiceMergerSetup-${{ steps.release_package_version.outputs.version }}.exe" -Force
 
       - name: Upload installers to release
         uses: softprops/action-gh-release@v2
@@ -126,4 +135,4 @@ jobs:
           tag_name: ${{ steps.ensure_tag.outputs.tag }}
           files: |
             artifacts/invoice-merger-win.zip
-            artifacts/InvoiceMergerSetup-${{ steps.package_version.outputs.version }}.exe
+            artifacts/InvoiceMergerSetup-${{ steps.release_package_version.outputs.version }}.exe
