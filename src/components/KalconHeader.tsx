@@ -9,7 +9,6 @@ export default function KalconHeader() {
     const [issueDescription, setIssueDescription] = useState('');
 
     const electronAPI = useMemo(() => (typeof window !== 'undefined' ? window.electronAPI : undefined), []);
-    const isElectron = Boolean(electronAPI?.reportIssue);
 
     const openIssueModal = useCallback(() => {
         setIssueTitle('Bug report');

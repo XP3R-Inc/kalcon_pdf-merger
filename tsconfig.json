@@ -44,6 +44,8 @@
         "node_modules",
         ".next",
         "out",
+        ".next/**",
+        "out/**",
         "dist"
     ]
 }

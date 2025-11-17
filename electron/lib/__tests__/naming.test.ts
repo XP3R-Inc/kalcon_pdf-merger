@@ -1,3 +1,4 @@
+import path from 'path';
 import { describe, it, expect } from 'vitest';
 import { generateOutputPath } from '../naming';
 
@@ -9,7 +10,8 @@ describe('generateOutputPath', () => {
 
         const result = generateOutputPath(outputDir, month, invoiceName);
 
-        expect(result).toBe('/path/to/output/04-25 - ClientInvoice + Backup.pdf');
+        const expected = path.join(outputDir, '04-25 - ClientInvoice + Backup.pdf');
+        expect(result).toBe(expected);
     });
 
     it('should handle invoice names with spaces', () => {
@@ -19,7 +21,8 @@ describe('generateOutputPath', () => {
 
         const result = generateOutputPath(outputDir, month, invoiceName);
 
-        expect(result).toBe('/path/to/output/12-24 - Client Invoice 2024 + Backup.pdf');
+        const expected = path.join(outputDir, '12-24 - Client Invoice 2024 + Backup.pdf');
+        expect(result).toBe(expected);
     });
 
     it('should handle different month formats', () => {
@@ -29,7 +32,8 @@ describe('generateOutputPath', () => {
 
         const result = generateOutputPath(outputDir, month, invoiceName);
 
-        expect(result).toBe('/output/01-26 - Test + Backup.pdf');
+        const expected = path.join(outputDir, '01-26 - Test + Backup.pdf');
+        expect(result).toBe(expected);
     });
 });
 
