@@ -1,6 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
-import { formatFilename, DEFAULT_FILENAME_TEMPLATE } from './filenameFormatter';
+import { formatFilename } from './filenameFormatter';
 
 /**
  * Generate output path with automatic numeric suffix to avoid overwriting
@@ -49,17 +49,15 @@ export async function getUniqueOutputPath(
 
     let outputPath = path.join(outputDir, `${baseName}${ext}`);
     let counter = 1;
+    let pathAvailable = false;
 
-    // Check if file exists and increment counter until we find a unique name
-    while (true) {
+    while (!pathAvailable) {
         try {
             await fs.access(outputPath);
-            // File exists, try next number
             outputPath = path.join(outputDir, `${baseName} (${counter})${ext}`);
             counter++;
         } catch {
-            // File doesn't exist, this path is available
-            break;
+            pathAvailable = true;
         }
     }
 

@@ -5,7 +5,6 @@ import type { ClientPeriod, FileInfo } from '../../../electron/ipc/types';
 import StepIndicator from '../../components/StepIndicator';
 import Sidebar from '../../components/Sidebar';
 import FolderTree, { buildFolderTree } from '../../components/FolderTree';
-import type { BackupFolder } from '../../lib/types';
 import { navigateToPage } from '../../lib/router';
 
 interface TreeFolder {
@@ -16,13 +15,45 @@ interface TreeFolder {
     depth: number;
 }
 
-interface ExtendedClient extends ClientPeriod {
-    invoiceCandidates?: FileInfo[];
-    selectedInvoice?: FileInfo;
-    backupFolders: BackupFolder[];
-    folderTree: TreeFolder[];
+interface InvoiceSelection {
+    invoice: FileInfo;
     selectedBackupPaths: Set<string>;
 }
+
+interface ExtendedClient extends ClientPeriod {
+    invoiceCandidates?: FileInfo[];
+    invoiceSelections: InvoiceSelection[];
+    folderTree: TreeFolder[];
+}
+
+const findFolderByPath = (folders: TreeFolder[], targetPath: string): TreeFolder | null => {
+    for (const folder of folders) {
+        if (folder.path === targetPath) {
+            return folder;
+        }
+        const found = findFolderByPath(folder.subfolders, targetPath);
+        if (found) {
+            return found;
+        }
+    }
+    return null;
+};
+
+const collectFilesFromFolder = (folder: TreeFolder): FileInfo[] => {
+    const files: FileInfo[] = [...folder.files];
+    folder.subfolders.forEach((sub) => {
+        files.push(...collectFilesFromFolder(sub));
+    });
+    return files;
+};
+
+const collectFilesFromTree = (folders: TreeFolder[], folderPath: string): FileInfo[] => {
+    const targetFolder = findFolderByPath(folders, folderPath);
+    if (!targetFolder) {
+        return [];
+    }
+    return collectFilesFromFolder(targetFolder);
+};
 
 export default function ClientsPage() {
     const [clients, setClients] = useState<ExtendedClient[]>([]);
@@ -33,10 +64,11 @@ export default function ClientsPage() {
         expense: '',
         showAll: false,
     });
-
-    // Sidebar state
+    const [invoiceDrafts, setInvoiceDrafts] = useState<Record<string, string>>({});
+    const [loadingInvoices, setLoadingInvoices] = useState<Record<string, boolean>>({});
     const [sidebarOpen, setSidebarOpen] = useState(false);
-    const [selectedClientForSidebar, setSelectedClientForSidebar] = useState<ExtendedClient | null>(null);
+    const [sidebarContext, setSidebarContext] = useState<{ clientKey: string; invoicePath: string } | null>(null);
+    const [sidebarSearch, setSidebarSearch] = useState('');
 
     const steps = [
         { number: 1, label: 'Base Folder', status: 'completed' as const },
@@ -47,27 +79,47 @@ export default function ClientsPage() {
 
     useEffect(() => {
         const stored = sessionStorage.getItem('clients');
-        if (!stored) {
+        if (!stored || stored === 'undefined') {
+            window.alert('We need to re-run the period selection step before choosing clients.');
             navigateToPage('/period');
             return;
         }
 
-        const parsed: ClientPeriod[] = JSON.parse(stored);
+        let parsed: ClientPeriod[];
+        try {
+            parsed = JSON.parse(stored);
+        } catch (error) {
+            console.error('Failed to parse cached clients payload:', error);
+            sessionStorage.removeItem('clients');
+            window.alert('Your previous client selection data was invalid. Please re-run the period selection step.');
+            navigateToPage('/period');
+            return;
+        }
+
+        if (!Array.isArray(parsed) || parsed.length === 0) {
+            window.alert('No clients were found for the last period scan. Please select a period again.');
+            navigateToPage('/period');
+            return;
+        }
 
         // Initialize extended clients with backup folders and tree
         const extended: ExtendedClient[] = parsed.map((client) => {
             const folderTree = buildFolderTree(client.backupFiles, client.backupPath);
+            const initialSelections: InvoiceSelection[] = [];
 
-            // Auto-select all backup files initially
-            const selectedBackupPaths = new Set<string>();
-            client.backupFiles.forEach((file) => selectedBackupPaths.add(file.path));
+            if (client.invoiceFile) {
+                const defaultSelectedPaths = new Set<string>();
+                client.backupFiles.forEach((file) => defaultSelectedPaths.add(file.path));
+                initialSelections.push({
+                    invoice: client.invoiceFile,
+                    selectedBackupPaths: defaultSelectedPaths,
+                });
+            }
 
             return {
                 ...client,
-                selectedInvoice: client.invoiceFile || undefined,
-                backupFolders: [], // Keep for compatibility
+                invoiceSelections: initialSelections,
                 folderTree,
-                selectedBackupPaths,
             };
         });
 
@@ -76,7 +128,7 @@ export default function ClientsPage() {
         // Auto-select clients with invoices by default
         const autoSelected = new Set<string>();
         extended.forEach((client) => {
-            if (client.invoiceFile) {
+            if (client.invoiceSelections.length > 0) {
                 autoSelected.add(getClientKey(client));
             }
         });
@@ -107,159 +159,225 @@ export default function ClientsPage() {
         setSelectedClients(new Set());
     };
 
-    // Handle invoice selection for clients with multiple candidates
-    const handleInvoiceChange = async (client: ExtendedClient, invoicePath: string) => {
-        // Fetch invoice candidates if not already loaded
-        if (!client.invoiceCandidates) {
-            try {
-                if (typeof window !== 'undefined' && window.electronAPI) {
-                    const result = await window.electronAPI.getInvoiceCandidates({
-                        clientPath: client.clientPath,
-                        fiscalYear: client.fiscalYear,
-                        month: client.month,
-                    });
+    const ensureInvoiceCandidates = async (client: ExtendedClient): Promise<FileInfo[]> => {
+        if (client.invoiceCandidates) {
+            return client.invoiceCandidates;
+        }
 
-                    const updatedClients = clients.map((c) => {
-                        if (getClientKey(c) === getClientKey(client)) {
-                            const selectedInvoice = result.candidates.find((f) => f.path === invoicePath);
-                            return {
-                                ...c,
-                                invoiceCandidates: result.candidates,
-                                selectedInvoice,
-                            };
-                        }
-                        return c;
-                    });
+        if (typeof window === 'undefined' || !window.electronAPI) {
+            return [];
+        }
 
-                    setClients(updatedClients);
-                }
-            } catch (error) {
-                console.error('Failed to get invoice candidates:', error);
-            }
-        } else {
-            // Update selected invoice
-            const updatedClients = clients.map((c) => {
-                if (getClientKey(c) === getClientKey(client)) {
-                    const selectedInvoice = client.invoiceCandidates!.find((f) => f.path === invoicePath);
-                    return {
-                        ...c,
-                        selectedInvoice,
-                    };
-                }
-                return c;
+        const key = getClientKey(client);
+        setLoadingInvoices((prev) => ({ ...prev, [key]: true }));
+
+        try {
+            const result = await window.electronAPI.getInvoiceCandidates({
+                clientPath: client.clientPath,
+                fiscalYear: client.fiscalYear,
+                month: client.month,
             });
 
-            setClients(updatedClients);
+            setClients((prev) =>
+                prev.map((c) =>
+                    getClientKey(c) === key
+                        ? {
+                              ...c,
+                              invoiceCandidates: result.candidates,
+                          }
+                        : c
+                )
+            );
+
+            return result.candidates;
+        } catch (error) {
+            console.error('Failed to get invoice candidates:', error);
+            return [];
+        } finally {
+            setLoadingInvoices((prev) => ({ ...prev, [key]: false }));
         }
     };
 
-    // Open sidebar for backup selection
-    const openBackupSidebar = (client: ExtendedClient) => {
-        setSelectedClientForSidebar(client);
+    const addInvoiceSelection = async (client: ExtendedClient, invoicePath: string) => {
+        const key = getClientKey(client);
+        const candidates = await ensureInvoiceCandidates(client);
+        const invoice = candidates.find((f) => f.path === invoicePath);
+
+        if (!invoice) {
+            return;
+        }
+
+        setClients((prev) =>
+            prev.map((c) => {
+                if (getClientKey(c) !== key) return c;
+                if (c.invoiceSelections.some((sel) => sel.invoice.path === invoicePath)) {
+                    return c;
+                }
+                const defaultPaths = new Set<string>();
+                c.backupFiles.forEach((file) => defaultPaths.add(file.path));
+                return {
+                    ...c,
+                    invoiceSelections: [
+                        ...c.invoiceSelections,
+                        {
+                            invoice,
+                            selectedBackupPaths: defaultPaths,
+                        },
+                    ],
+                };
+            })
+        );
+
+        setInvoiceDrafts((prev) => ({ ...prev, [key]: '' }));
+
+        setSelectedClients((prev) => {
+            if (prev.has(key)) {
+                return prev;
+            }
+            const next = new Set(prev);
+            next.add(key);
+            return next;
+        });
+    };
+
+    const removeInvoiceSelection = (client: ExtendedClient, invoicePath: string) => {
+        const key = getClientKey(client);
+        const remainingSelections = client.invoiceSelections.filter((sel) => sel.invoice.path !== invoicePath);
+
+        setClients((prev) =>
+            prev.map((c) => {
+                if (getClientKey(c) !== key) return c;
+                return {
+                    ...c,
+                    invoiceSelections: remainingSelections,
+                };
+            })
+        );
+
+        if (remainingSelections.length === 0) {
+            setSelectedClients((prev) => {
+                if (!prev.has(key)) return prev;
+                const next = new Set(prev);
+                next.delete(key);
+                return next;
+            });
+        }
+
+        setSidebarContext((prev) => {
+            if (prev && prev.clientKey === key && prev.invoicePath === invoicePath) {
+                return null;
+            }
+            return prev;
+        });
+    };
+
+    // Open sidebar for backup selection per invoice
+    const openBackupSidebar = (client: ExtendedClient, invoicePath: string) => {
+        setSidebarContext({
+            clientKey: getClientKey(client),
+            invoicePath,
+        });
+        setSidebarSearch('');
         setSidebarOpen(true);
     };
 
     // Toggle folder selection (recursive for tree)
     const toggleFolder = (folderPath: string) => {
-        if (!selectedClientForSidebar) return;
+        if (!sidebarContext) return;
 
-        const updatedClients = clients.map((c) => {
-            if (getClientKey(c) === getClientKey(selectedClientForSidebar)) {
-                const newBackupPaths = new Set(c.selectedBackupPaths);
+        const { clientKey, invoicePath } = sidebarContext;
+        setClients((prev) =>
+            prev.map((client) => {
+                if (getClientKey(client) !== clientKey) return client;
 
-                // Recursively collect all files in folder and subfolders
-                const collectFilesFromTree = (folders: TreeFolder[], targetPath: string): FileInfo[] => {
-                    const allFiles: FileInfo[] = [];
+                const filesInFolder = collectFilesFromTree(client.folderTree, folderPath);
+                if (filesInFolder.length === 0) return client;
 
-                    const findFolder = (folders: TreeFolder[]): TreeFolder | null => {
-                        for (const folder of folders) {
-                            if (folder.path === targetPath) return folder;
-                            const found = findFolder(folder.subfolders);
-                            if (found) return found;
-                        }
-                        return null;
-                    };
-
-                    const collectFiles = (folder: TreeFolder) => {
-                        allFiles.push(...folder.files);
-                        folder.subfolders.forEach(sub => collectFiles(sub));
-                    };
-
-                    const targetFolder = findFolder(folders);
-                    if (targetFolder) {
-                        collectFiles(targetFolder);
-                    }
-
-                    return allFiles;
-                };
-
-                const filesInFolder = collectFilesFromTree(c.folderTree, folderPath);
-
-                if (filesInFolder.length > 0) {
-                    // Check if all files are selected
+                const updatedSelections = client.invoiceSelections.map((selection) => {
+                    if (selection.invoice.path !== invoicePath) return selection;
+                    const newBackupPaths = new Set(selection.selectedBackupPaths);
                     const allSelected = filesInFolder.every((file) => newBackupPaths.has(file.path));
 
                     if (allSelected) {
-                        // Deselect all
                         filesInFolder.forEach((file) => newBackupPaths.delete(file.path));
                     } else {
-                        // Select all
                         filesInFolder.forEach((file) => newBackupPaths.add(file.path));
                     }
-                }
 
-                return { ...c, selectedBackupPaths: newBackupPaths };
-            }
-            return c;
-        });
+                    return {
+                        ...selection,
+                        selectedBackupPaths: newBackupPaths,
+                    };
+                });
 
-        setClients(updatedClients);
-        setSelectedClientForSidebar(updatedClients.find((c) => getClientKey(c) === getClientKey(selectedClientForSidebar))!);
+                return {
+                    ...client,
+                    invoiceSelections: updatedSelections,
+                };
+            })
+        );
     };
 
     // Toggle individual file
     const toggleFile = (filePath: string) => {
-        if (!selectedClientForSidebar) return;
+        if (!sidebarContext) return;
 
-        const updatedClients = clients.map((c) => {
-            if (getClientKey(c) === getClientKey(selectedClientForSidebar)) {
-                const newBackupPaths = new Set(c.selectedBackupPaths);
-                if (newBackupPaths.has(filePath)) {
-                    newBackupPaths.delete(filePath);
-                } else {
-                    newBackupPaths.add(filePath);
-                }
-                return { ...c, selectedBackupPaths: newBackupPaths };
-            }
-            return c;
-        });
+        const { clientKey, invoicePath } = sidebarContext;
+        setClients((prev) =>
+            prev.map((client) => {
+                if (getClientKey(client) !== clientKey) return client;
 
-        setClients(updatedClients);
-        setSelectedClientForSidebar(updatedClients.find((c) => getClientKey(c) === getClientKey(selectedClientForSidebar))!);
+                const updatedSelections = client.invoiceSelections.map((selection) => {
+                    if (selection.invoice.path !== invoicePath) return selection;
+                    const newBackupPaths = new Set(selection.selectedBackupPaths);
+                    if (newBackupPaths.has(filePath)) {
+                        newBackupPaths.delete(filePath);
+                    } else {
+                        newBackupPaths.add(filePath);
+                    }
+                    return {
+                        ...selection,
+                        selectedBackupPaths: newBackupPaths,
+                    };
+                });
+
+                return {
+                    ...client,
+                    invoiceSelections: updatedSelections,
+                };
+            })
+        );
     };
 
     const handleContinue = () => {
-        if (selectedClients.size === 0) {
-            alert('Please select at least one client');
+        const selectedJobs = clients
+            .filter((client) => selectedClients.has(getClientKey(client)))
+            .flatMap((client) =>
+                client.invoiceSelections.map((selection) => ({
+                    clientName: client.clientName,
+                    clientPath: client.clientPath,
+                    fiscalYear: client.fiscalYear,
+                    month: client.month,
+                    invoiceFile: selection.invoice,
+                    backupFiles: client.backupFiles.filter((file) => selection.selectedBackupPaths.has(file.path)),
+                }))
+            )
+            .filter((job) => job.invoiceFile);
+
+        if (selectedJobs.length === 0) {
+            alert('Please select at least one invoice to continue');
             return;
         }
 
-        // Store selections
-        const selectedClientsList = clients
-            .filter((c) => selectedClients.has(getClientKey(c)))
-            .map((c) => ({
-                ...c,
-                backupFiles: c.backupFiles.filter((f) => c.selectedBackupPaths.has(f.path)),
-                invoiceFile: c.selectedInvoice || c.invoiceFile,
-            }));
-
-        sessionStorage.setItem('selectedClients', JSON.stringify(selectedClientsList));
+        sessionStorage.setItem('selectedClients', JSON.stringify(selectedJobs));
         navigateToPage('/merge');
     };
 
     // Apply filters
     const filteredClients = clients.filter((client) => {
-        if (!filters.showAll && !client.invoiceFile && !client.selectedInvoice) {
+        const hasInvoiceSelections = client.invoiceSelections.length > 0;
+
+        if (!filters.showAll && !hasInvoiceSelections) {
             return false;
         }
 
@@ -267,24 +385,43 @@ export default function ClientsPage() {
             return false;
         }
 
-        if (filters.invoice && client.selectedInvoice) {
-            if (!client.selectedInvoice.name.toLowerCase().includes(filters.invoice.toLowerCase())) {
+        if (filters.invoice) {
+            const invoiceMatch = client.invoiceSelections.some((selection) =>
+                selection.invoice.name.toLowerCase().includes(filters.invoice.toLowerCase())
+            );
+            if (!invoiceMatch) {
                 return false;
             }
         }
 
         if (filters.expense) {
-            const hasMatchingExpense = Array.from(client.selectedBackupPaths).some((path) => {
-                const file = client.backupFiles.find((f) => f.path === path);
-                return file && file.name.toLowerCase().includes(filters.expense.toLowerCase());
-            });
-            if (!hasMatchingExpense) {
+            const expenseMatch = client.invoiceSelections.some((selection) =>
+                Array.from(selection.selectedBackupPaths).some((path) => {
+                    const file = client.backupFiles.find((f) => f.path === path);
+                    return file && file.name.toLowerCase().includes(filters.expense.toLowerCase());
+                })
+            );
+            if (!expenseMatch) {
                 return false;
             }
         }
 
         return true;
     });
+
+    const totalSelectedInvoices = clients.reduce((count, client) => {
+        if (!selectedClients.has(getClientKey(client))) {
+            return count;
+        }
+        return count + client.invoiceSelections.length;
+    }, 0);
+
+    const sidebarClient = sidebarContext
+        ? clients.find((client) => getClientKey(client) === sidebarContext.clientKey)
+        : null;
+    const sidebarSelection = sidebarClient?.invoiceSelections.find(
+        (selection) => selection.invoice.path === sidebarContext?.invoicePath
+    );
 
     return (
         <div className="min-h-screen p-8">
@@ -379,10 +516,14 @@ export default function ClientsPage() {
 
                     {/* Selection Actions */}
                     <div className="flex items-center justify-between mb-4">
-                        <div className="text-sm text-gray-600">
-                            <span className="font-semibold text-gray-900">
-                                {selectedClients.size}
-                            </span> of {filteredClients.length} selected
+                        <div className="text-sm text-gray-600 flex gap-4">
+                            <span>
+                                <span className="font-semibold text-gray-900">{selectedClients.size}</span> / {filteredClients.length} clients
+                            </span>
+                            <span>
+                                <span className="font-semibold text-gray-900">{totalSelectedInvoices}</span> invoice
+                                {totalSelectedInvoices === 1 ? '' : 's'}
+                            </span>
                         </div>
 
                         <div className="flex gap-2">
@@ -401,116 +542,168 @@ export default function ClientsPage() {
                         </div>
                     </div>
 
-                    {/* Clients Table */}
-                    <div className="table-wrapper max-h-[500px] overflow-y-auto mb-6">
-                        <table className="table">
-                            <thead>
-                                <tr>
-                                    <th className="w-12">
-                                        <input
-                                            type="checkbox"
-                                            checked={filteredClients.length > 0 && filteredClients.every((c) => selectedClients.has(getClientKey(c)))}
-                                            onChange={(e) => e.target.checked ? selectAll() : deselectAll()}
-                                            className="checkbox"
-                                        />
-                                    </th>
-                                    <th>Client Name</th>
-                                    <th>Invoice</th>
-                                    <th>Selected Backups</th>
-                                    <th className="text-center">Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {filteredClients.map((client) => {
-                                    const key = getClientKey(client);
-                                    const isSelected = selectedClients.has(key);
+                    {/* Client Cards */}
+                    <div className="space-y-4 mb-6">
+                        {filteredClients.map((client) => {
+                            const key = getClientKey(client);
+                            const isSelected = selectedClients.has(key);
+                            const selectedPaths = client.invoiceSelections.map((sel) => sel.invoice.path);
+                            const availableInvoices = (client.invoiceCandidates ?? []).filter(
+                                (inv) => !selectedPaths.includes(inv.path)
+                            );
+                            const draftValue = invoiceDrafts[key] ?? '';
+                            const isLoadingInvoices = Boolean(loadingInvoices[key]);
 
-                                    return (
-                                        <tr
-                                            key={key}
-                                            className={isSelected ? 'selected' : ''}
-                                        >
-                                            <td>
-                                                <input
-                                                    type="checkbox"
-                                                    checked={isSelected}
-                                                    onChange={() => toggleClient(client)}
-                                                    className="checkbox"
-                                                />
-                                            </td>
-                                            <td>
-                                                <div className="font-medium text-gray-900">{client.clientName}</div>
-                                                <div className="text-xs text-gray-500">
-                                                    FY{client.fiscalYear} {client.month}
+                            return (
+                                <div
+                                    key={key}
+                                    className={`border rounded-2xl p-4 shadow-sm bg-white transition-all ${
+                                        isSelected ? 'ring-2 ring-blue-200 shadow-md' : ''
+                                    }`}
+                                >
+                                    <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+                                        <label className="flex items-start gap-3 cursor-pointer">
+                                            <input
+                                                type="checkbox"
+                                                checked={isSelected}
+                                                onChange={() => toggleClient(client)}
+                                                className="checkbox mt-1"
+                                            />
+                                            <div>
+                                                <div className="flex flex-wrap items-center gap-2">
+                                                    <h3 className="text-lg font-semibold text-gray-900">
+                                                        {client.clientName}
+                                                    </h3>
+                                                    <span className="badge badge-info text-xs">
+                                                        FY{client.fiscalYear} {client.month}
+                                                    </span>
                                                 </div>
-                                            </td>
-                                            <td>
-                                                {client.selectedInvoice ? (
-                                                    <select
-                                                        value={client.selectedInvoice.path}
-                                                        onChange={(e) => handleInvoiceChange(client, e.target.value)}
-                                                        className="input text-sm py-1 bg-white"
-                                                        onClick={async () => {
-                                                            // Load candidates on first click
-                                                            if (!client.invoiceCandidates) {
-                                                                try {
-                                                                    const result = await window.electronAPI.getInvoiceCandidates({
-                                                                        clientPath: client.clientPath,
-                                                                        fiscalYear: client.fiscalYear,
-                                                                        month: client.month,
-                                                                    });
+                                                <p className="text-sm text-gray-500 mt-1">
+                                                    {client.invoiceSelections.length} invoice
+                                                    {client.invoiceSelections.length === 1 ? '' : 's'} selected
+                                                </p>
+                                            </div>
+                                        </label>
+                                        <div className="flex flex-wrap gap-2">
+                                            <span className="badge badge-info bg-blue-100 text-blue-800">
+                                                {client.invoiceSelections.length} configuration
+                                                {client.invoiceSelections.length === 1 ? '' : 's'}
+                                            </span>
+                                            <span className="badge badge-info bg-emerald-100 text-emerald-700">
+                                                {client.backupFiles.length} backup file
+                                                {client.backupFiles.length === 1 ? '' : 's'}
+                                            </span>
+                                        </div>
+                                    </div>
 
-                                                                    const updatedClients = clients.map((c) => {
-                                                                        if (getClientKey(c) === key) {
-                                                                            return { ...c, invoiceCandidates: result.candidates };
-                                                                        }
-                                                                        return c;
-                                                                    });
-
-                                                                    setClients(updatedClients);
-                                                                } catch (error) {
-                                                                    console.error(error);
-                                                                }
-                                                            }
-                                                        }}
-                                                    >
-                                                        <option value={client.selectedInvoice.path}>
-                                                            {client.selectedInvoice.name}
-                                                        </option>
-                                                        {client.invoiceCandidates?.map((inv) => (
-                                                            inv.path !== client.selectedInvoice?.path && (
-                                                                <option key={inv.path} value={inv.path}>
-                                                                    {inv.name}
-                                                                </option>
-                                                            )
-                                                        ))}
-                                                    </select>
-                                                ) : (
-                                                    <span className="badge badge-warning">No invoice</span>
-                                                )}
-                                            </td>
-                                            <td>
-                                                <span className="badge badge-info">
-                                                    {client.selectedBackupPaths.size} / {client.backupFiles.length}
-                                                </span>
-                                            </td>
-                                            <td className="text-center">
-                                                <button
-                                                    onClick={() => openBackupSidebar(client)}
-                                                    className="btn btn-sm btn-secondary"
+                                    <div className="mt-4 space-y-3">
+                                        {client.invoiceSelections.length > 0 ? (
+                                            client.invoiceSelections.map((selection) => (
+                                                <div
+                                                    key={selection.invoice.path}
+                                                    className="rounded-xl border border-gray-200 bg-gray-50 p-3"
                                                 >
-                                                    <svg className="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                                                    </svg>
-                                                    Configure
+                                                    <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                                                        <div>
+                                                            <p className="font-medium text-gray-900">{selection.invoice.name}</p>
+                                                            <p className="text-xs text-gray-500 mt-1">
+                                                                {selection.selectedBackupPaths.size} backup
+                                                                {selection.selectedBackupPaths.size === 1 ? '' : 's'} selected
+                                                            </p>
+                                                        </div>
+                                                        <div className="flex flex-wrap gap-2">
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => openBackupSidebar(client, selection.invoice.path)}
+                                                                className="btn btn-sm btn-secondary"
+                                                            >
+                                                                Configure Backups
+                                                            </button>
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => removeInvoiceSelection(client, selection.invoice.path)}
+                                                                className="btn btn-sm btn-secondary"
+                                                            >
+                                                                Remove
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            ))
+                                        ) : (
+                                            <div className="rounded-xl border border-dashed border-gray-300 p-4 text-sm text-gray-500">
+                                                No invoices selected yet.
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    <div className="mt-5 border-t pt-4 space-y-2">
+                                        <label className="text-xs font-semibold text-gray-600 uppercase tracking-wide">
+                                            Add another invoice
+                                        </label>
+                                        {client.invoiceCandidates || isLoadingInvoices ? (
+                                            <div className="flex flex-col gap-2 sm:flex-row">
+                                                <select
+                                                    value={draftValue}
+                                                    disabled={isLoadingInvoices || availableInvoices.length === 0}
+                                                    onChange={(e) =>
+                                                        setInvoiceDrafts((prev) => ({ ...prev, [key]: e.target.value }))
+                                                    }
+                                                    onFocus={() => ensureInvoiceCandidates(client)}
+                                                    className="input text-sm bg-white flex-1"
+                                                >
+                                                    <option value="">
+                                                        {isLoadingInvoices
+                                                            ? 'Loading invoices...'
+                                                            : availableInvoices.length === 0
+                                                                ? 'No additional invoices'
+                                                                : 'Select invoice'}
+                                                    </option>
+                                                    {availableInvoices.map((inv) => (
+                                                        <option key={inv.path} value={inv.path}>
+                                                            {inv.name}
+                                                        </option>
+                                                    ))}
+                                                </select>
+                                                <button
+                                                    type="button"
+                                                    className="btn btn-secondary btn-sm"
+                                                    disabled={!draftValue}
+                                                    onClick={() => {
+                                                        if (!draftValue) return;
+                                                        addInvoiceSelection(client, draftValue);
+                                                    }}
+                                                >
+                                                    Add
                                                 </button>
-                                            </td>
-                                        </tr>
-                                    );
-                                })}
-                            </tbody>
-                        </table>
+                                            </div>
+                                        ) : (
+                                            <button
+                                                type="button"
+                                                onClick={() => ensureInvoiceCandidates(client)}
+                                                className="btn btn-sm btn-secondary w-full"
+                                            >
+                                                Load invoice list
+                                            </button>
+                                        )}
+                                        {client.invoiceCandidates && (
+                                            <button
+                                                type="button"
+                                                className="text-xs text-blue-600 hover:underline"
+                                                onClick={() => ensureInvoiceCandidates(client)}
+                                            >
+                                                Refresh list
+                                            </button>
+                                        )}
+                                        {client.invoiceCandidates && availableInvoices.length === 0 && (
+                                            <p className="text-xs text-gray-500">
+                                                All invoices for this client are already selected.
+                                            </p>
+                                        )}
+                                    </div>
+                                </div>
+                            );
+                        })}
                     </div>
 
                     {filteredClients.length === 0 && (
@@ -527,9 +720,9 @@ export default function ClientsPage() {
                     <button
                         onClick={handleContinue}
                         className="btn btn-primary w-full py-4 text-lg font-semibold"
-                        disabled={selectedClients.size === 0}
+                        disabled={totalSelectedInvoices === 0}
                     >
-                        Continue to Merge ({selectedClients.size} selected)
+                        Continue to Merge ({totalSelectedInvoices} invoice{totalSelectedInvoices === 1 ? '' : 's'})
                         <svg className="w-5 h-5 inline ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
                         </svg>
@@ -539,31 +732,66 @@ export default function ClientsPage() {
 
             {/* Backup Selection Sidebar */}
             <Sidebar
-                isOpen={sidebarOpen}
-                onClose={() => setSidebarOpen(false)}
-                title={`Configure: ${selectedClientForSidebar?.clientName || ''}`}
+                isOpen={sidebarOpen && !!(sidebarClient && sidebarSelection)}
+                onClose={() => {
+                    setSidebarOpen(false);
+                    setSidebarContext(null);
+                }}
+                title={
+                    sidebarClient && sidebarSelection
+                        ? `Configure ${sidebarClient.clientName} • ${sidebarSelection.invoice.name}`
+                        : 'Configure Backups'
+                }
             >
-                {selectedClientForSidebar && (
+                {sidebarClient && sidebarSelection ? (
                     <div className="space-y-6">
                         {/* Summary */}
-                        <div className="p-4 rounded-lg" style={{
-                            background: 'linear-gradient(135deg, rgba(37, 150, 190, 0.05) 0%, rgba(0, 178, 200, 0.05) 100%)',
-                            border: '1px solid rgba(37, 150, 190, 0.2)'
-                        }}>
+                        <div
+                            className="p-4 rounded-lg"
+                            style={{
+                                background: 'linear-gradient(135deg, rgba(37, 150, 190, 0.05) 0%, rgba(0, 178, 200, 0.05) 100%)',
+                                border: '1px solid rgba(37, 150, 190, 0.2)',
+                            }}
+                        >
                             <h3 className="font-semibold text-gray-900 mb-2">Selection Summary</h3>
                             <div className="space-y-1 text-sm">
                                 <div className="flex justify-between">
                                     <span className="text-gray-600">Total Files:</span>
-                                    <span className="font-medium text-gray-900">{selectedClientForSidebar.backupFiles.length}</span>
+                                    <span className="font-medium text-gray-900">{sidebarClient.backupFiles.length}</span>
                                 </div>
                                 <div className="flex justify-between">
                                     <span className="text-gray-600">Selected:</span>
-                                    <span className="font-medium text-green-600">{selectedClientForSidebar.selectedBackupPaths.size}</span>
+                                    <span className="font-medium text-green-600">{sidebarSelection.selectedBackupPaths.size}</span>
                                 </div>
                                 <div className="flex justify-between">
                                     <span className="text-gray-600">Folders:</span>
-                                    <span className="font-medium text-gray-900">{selectedClientForSidebar.backupFolders.length}</span>
+                                    <span className="font-medium text-gray-900">{sidebarClient.folderTree.length}</span>
                                 </div>
+                            </div>
+                        </div>
+
+                        {/* Search */}
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">
+                                Search Expense Backups
+                            </label>
+                            <div className="flex gap-2">
+                                <input
+                                    type="text"
+                                    value={sidebarSearch}
+                                    onChange={(e) => setSidebarSearch(e.target.value)}
+                                    placeholder="Type a folder or file name..."
+                                    className="input bg-white text-sm flex-1"
+                                />
+                                {sidebarSearch && (
+                                    <button
+                                        type="button"
+                                        className="btn btn-secondary btn-sm"
+                                        onClick={() => setSidebarSearch('')}
+                                    >
+                                        Clear
+                                    </button>
+                                )}
                             </div>
                         </div>
 
@@ -572,7 +800,7 @@ export default function ClientsPage() {
                             <div className="flex items-center justify-between mb-3">
                                 <h3 className="font-semibold text-gray-900">Expense Backup Files</h3>
                                 <span className="text-sm text-gray-600">
-                                    {selectedClientForSidebar.selectedBackupPaths.size} / {selectedClientForSidebar.backupFiles.length} selected
+                                    {sidebarSelection.selectedBackupPaths.size} / {sidebarClient.backupFiles.length} selected
                                 </span>
                             </div>
 
@@ -581,21 +809,22 @@ export default function ClientsPage() {
                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                                 </svg>
                                 <span>
-                                    Navigate the folder tree and select/deselect files or entire folders with their subfolders.
+                                    Navigate the folder tree, or use search to filter down to specific files quickly.
                                 </span>
                             </div>
 
                             <div className="border border-gray-200 rounded-lg p-3 bg-white max-h-96 overflow-y-auto">
                                 <FolderTree
-                                    folders={selectedClientForSidebar.folderTree}
-                                    selectedPaths={selectedClientForSidebar.selectedBackupPaths}
+                                    folders={sidebarClient.folderTree}
+                                    selectedPaths={sidebarSelection.selectedBackupPaths}
                                     onToggleFolder={toggleFolder}
                                     onToggleFile={toggleFile}
+                                    filterQuery={sidebarSearch}
                                 />
                             </div>
 
                             {/* Empty State */}
-                            {selectedClientForSidebar.folderTree.length === 0 && (
+                            {sidebarClient.folderTree.length === 0 && (
                                 <div className="text-center py-12 bg-gray-50 rounded-lg">
                                     <svg className="w-16 h-16 text-gray-400 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
@@ -609,33 +838,48 @@ export default function ClientsPage() {
                         {/* Actions */}
                         <div className="flex gap-3 pt-4 border-t">
                             <button
+                                type="button"
                                 onClick={() => {
-                                    if (!selectedClientForSidebar) return;
-                                    const updatedClients = clients.map((c) => {
-                                        if (getClientKey(c) === getClientKey(selectedClientForSidebar)) {
-                                            const allPaths = new Set(c.backupFiles.map((f) => f.path));
-                                            return { ...c, selectedBackupPaths: allPaths };
-                                        }
-                                        return c;
-                                    });
-                                    setClients(updatedClients);
-                                    setSelectedClientForSidebar(updatedClients.find((c) => getClientKey(c) === getClientKey(selectedClientForSidebar))!);
+                                    if (!sidebarClient || !sidebarSelection) return;
+                                    const key = getClientKey(sidebarClient);
+                                    setClients((prev) =>
+                                        prev.map((client) => {
+                                            if (getClientKey(client) !== key) return client;
+                                            const updatedSelections = client.invoiceSelections.map((selection) =>
+                                                selection.invoice.path === sidebarSelection.invoice.path
+                                                    ? {
+                                                          ...selection,
+                                                          selectedBackupPaths: new Set(client.backupFiles.map((file) => file.path)),
+                                                      }
+                                                    : selection
+                                            );
+                                            return { ...client, invoiceSelections: updatedSelections };
+                                        })
+                                    );
                                 }}
                                 className="btn btn-secondary flex-1"
                             >
                                 Select All
                             </button>
                             <button
+                                type="button"
                                 onClick={() => {
-                                    if (!selectedClientForSidebar) return;
-                                    const updatedClients = clients.map((c) => {
-                                        if (getClientKey(c) === getClientKey(selectedClientForSidebar)) {
-                                            return { ...c, selectedBackupPaths: new Set<string>() };
-                                        }
-                                        return c;
-                                    });
-                                    setClients(updatedClients);
-                                    setSelectedClientForSidebar(updatedClients.find((c) => getClientKey(c) === getClientKey(selectedClientForSidebar))!);
+                                    if (!sidebarClient || !sidebarSelection) return;
+                                    const key = getClientKey(sidebarClient);
+                                    setClients((prev) =>
+                                        prev.map((client) => {
+                                            if (getClientKey(client) !== key) return client;
+                                            const updatedSelections = client.invoiceSelections.map((selection) =>
+                                                selection.invoice.path === sidebarSelection.invoice.path
+                                                    ? {
+                                                          ...selection,
+                                                          selectedBackupPaths: new Set<string>(),
+                                                      }
+                                                    : selection
+                                            );
+                                            return { ...client, invoiceSelections: updatedSelections };
+                                        })
+                                    );
                                 }}
                                 className="btn btn-secondary flex-1"
                             >
@@ -643,6 +887,8 @@ export default function ClientsPage() {
                             </button>
                         </div>
                     </div>
+                ) : (
+                    <div className="text-gray-600">Select an invoice to configure its backups.</div>
                 )}
             </Sidebar>
         </div>

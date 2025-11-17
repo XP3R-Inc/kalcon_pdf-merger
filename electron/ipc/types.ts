@@ -128,6 +128,14 @@ export const MergeResponseSchema = z.object({
 
 export type MergeResponse = z.infer<typeof MergeResponseSchema>;
 
+export const ReportIssuePayloadSchema = z.object({
+    title: z.string().min(1),
+    description: z.string().optional(),
+    includeLogs: z.boolean().optional(),
+});
+
+export type ReportIssuePayload = z.infer<typeof ReportIssuePayloadSchema>;
+
 /**
  * IPC Channel definitions
  */
@@ -136,5 +144,7 @@ export const IPC_CHANNELS = {
     GET_INVOICE_CANDIDATES: 'get-invoice-candidates',
     MERGE: 'merge',
     PICK_OUTPUT_DIR: 'pick-output-dir',
+    REPORT_ISSUE: 'report-issue',
+    OPEN_SUPPORT_LINK: 'open-support-link',
 } as const;
 

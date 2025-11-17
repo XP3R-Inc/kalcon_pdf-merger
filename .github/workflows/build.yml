@@ -1,0 +1,89 @@
+name: Build and Package
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm run test
+
+      - name: Build renderer
+        run: npm run build:renderer
+
+      - name: Package Electron app
+        run: npm run make -- --platform=win32 --arch=x64
+
+      - name: Archive packaged output
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path artifacts -Force | Out-Null
+          Compress-Archive -Path out\make\* -DestinationPath artifacts\invoice-merger-win.zip -Force
+
+      - name: Upload packaged artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: invoice-merger-windows
+          path: artifacts/invoice-merger-win.zip
+
+  publish:
+    runs-on: windows-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build renderer
+        run: npm run build:renderer
+
+      - name: Package Electron app (release)
+        run: npm run make -- --platform=win32 --arch=x64
+
+      - name: Archive packaged output
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path artifacts -Force | Out-Null
+          Compress-Archive -Path out\make\* -DestinationPath artifacts\invoice-merger-win.zip -Force
+
+      - name: Publish release artifacts
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: npm run publish -- --platform=win32 --arch=x64
+
+      - name: Upload build zip to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/invoice-merger-win.zip

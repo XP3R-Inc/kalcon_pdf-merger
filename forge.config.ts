@@ -1,6 +1,7 @@
 import type { ForgeConfig } from '@electron-forge/shared-types';
 import { VitePlugin } from '@electron-forge/plugin-vite';
 import { MakerSquirrel } from '@electron-forge/maker-squirrel';
+import { PublisherGithub } from '@electron-forge/publisher-github';
 
 const config: ForgeConfig = {
     packagerConfig: {
@@ -18,6 +19,15 @@ const config: ForgeConfig = {
             setupIcon: './assets/icon.ico',
             authors: 'XP3R Inc.',
             description: 'Merge client invoices with expense backup PDFs',
+        }),
+    ],
+    publishers: [
+        new PublisherGithub({
+            repository: {
+                owner: 'XP3R-Inc',
+                name: 'kalcon_pdf-merger',
+            },
+            prerelease: false,
         }),
     ],
     plugins: [

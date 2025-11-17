@@ -1,14 +1,15 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import type { ClientPeriod, MergeResult } from '../../../electron/ipc/types';
+import type { MergeResult } from '../../../electron/ipc/types';
+import type { SelectedInvoiceJob } from '../../lib/types';
 import StepIndicator from '../../components/StepIndicator';
 import Notification from '../../components/Notification';
 import { formatFilename, getFilenamePreview, validateFilenameTemplate, FILENAME_TEMPLATES } from '../../lib/filenameFormatter';
 import { navigateToPage } from '../../lib/router';
 
 export default function MergePage() {
-    const [clients, setClients] = useState<ClientPeriod[]>([]);
+    const [clients, setClients] = useState<SelectedInvoiceJob[]>([]);
     const [outputMode, setOutputMode] = useState<'client-folder' | 'custom-folder'>('client-folder');
     const [customOutputPath, setCustomOutputPath] = useState<string>('');
     const [merging, setMerging] = useState(false);
@@ -35,7 +36,7 @@ export default function MergePage() {
             return;
         }
 
-        const parsed: ClientPeriod[] = JSON.parse(stored);
+        const parsed: SelectedInvoiceJob[] = JSON.parse(stored);
         setClients(parsed);
     }, []);
 
@@ -71,7 +72,7 @@ export default function MergePage() {
                     clientPath: client.clientPath,
                     fiscalYear: client.fiscalYear,
                     month: client.month,
-                    invoicePath: client.invoiceFile!.path,
+                    invoicePath: client.invoiceFile.path,
                     backupPaths: client.backupFiles.map((f) => f.path),
                 }));
 
@@ -163,7 +164,7 @@ export default function MergePage() {
                             <svg className="w-6 h-6 mr-2" style={{ color: '#2596be' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                             </svg>
-                            Selected Clients ({clients.length})
+                            Selected Invoice Jobs ({clients.length})
                         </h2>
                         <div className="table-wrapper max-h-60 overflow-y-auto">
                             <table className="table">
@@ -183,7 +184,7 @@ export default function MergePage() {
                                                 <div className="text-xs text-gray-500">FY{client.fiscalYear} {client.month}</div>
                                             </td>
                                             <td className="text-sm text-gray-600">
-                                                {client.invoiceFile?.name || 'N/A'}
+                                                {client.invoiceFile.name}
                                             </td>
                                             <td>
                                                 <span className="badge badge-info">
@@ -193,7 +194,7 @@ export default function MergePage() {
                                             <td className="text-xs font-mono text-gray-600 max-w-xs truncate">
                                                 {formatFilename(filenameTemplate, {
                                                     month: client.month,
-                                                    invoiceName: client.invoiceFile ? client.invoiceFile.name.replace('.pdf', '') : 'Invoice',
+                                                    invoiceName: client.invoiceFile.name.replace('.pdf', ''),
                                                     clientName: client.clientName,
                                                     fiscalYear: client.fiscalYear,
                                                 })}.pdf

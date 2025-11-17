@@ -1,0 +1,37 @@
+name: Create Issue on Build Failure
+
+on:
+  workflow_run:
+    workflows:
+      - Build and Package
+    types:
+      - completed
+
+jobs:
+  open-issue:
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create GitHub Issue
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const run = context.payload.workflow_run;
+            const issueTitle = `Build failed: ${run.name} #${run.run_number}`;
+            const issueBody = [
+              `The workflow **${run.name}** failed.`,
+              '',
+              `- Run: [${run.html_url}](${run.html_url})`,
+              `- Commit: ${run.head_commit.id} (${run.head_repository.full_name})`,
+              '',
+              'Please review the logs and take the necessary action.'
+            ].join('\n');
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: issueTitle,
+              body: issueBody,
+              labels: ['ci', 'automated-issue']
+            });

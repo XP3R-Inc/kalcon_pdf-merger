@@ -16,20 +16,41 @@ interface FolderTreeProps {
     selectedPaths: Set<string>;
     onToggleFolder: (folderPath: string) => void;
     onToggleFile: (filePath: string) => void;
+    filterQuery?: string;
 }
+
+const normalizeQuery = (query?: string) => query?.trim().toLowerCase() ?? '';
+
+const folderMatchesQuery = (folder: TreeFolder, query: string): boolean => {
+    if (!query) return true;
+    if (folder.name.toLowerCase().includes(query)) {
+        return true;
+    }
+    if (folder.files.some((file) => file.name.toLowerCase().includes(query))) {
+        return true;
+    }
+    return folder.subfolders.some((sub) => folderMatchesQuery(sub, query));
+};
 
 function TreeNode({
     folder,
     selectedPaths,
     onToggleFolder,
     onToggleFile,
+    filterQuery,
 }: {
     folder: TreeFolder;
     selectedPaths: Set<string>;
     onToggleFolder: (path: string) => void;
     onToggleFile: (path: string) => void;
+    filterQuery?: string;
 }) {
     const [isExpanded, setIsExpanded] = useState(true);
+    const query = normalizeQuery(filterQuery);
+
+    if (query && !folderMatchesQuery(folder, query)) {
+        return null;
+    }
 
     // Calculate selection state for this folder
     const allFilesInFolder: string[] = [];
@@ -43,7 +64,15 @@ function TreeNode({
     const allSelected = allFilesInFolder.length > 0 && selectedFilesCount === allFilesInFolder.length;
     const someSelected = selectedFilesCount > 0 && selectedFilesCount < allFilesInFolder.length;
 
-    const hasContent = folder.files.length > 0 || folder.subfolders.length > 0;
+    const folderNameMatches = query ? folder.name.toLowerCase().includes(query) : false;
+    const visibleFiles =
+        query && !folderNameMatches
+            ? folder.files.filter((file) => file.name.toLowerCase().includes(query))
+            : folder.files;
+    const hasVisibleChildren = query
+        ? folder.subfolders.some((sub) => folderMatchesQuery(sub, query))
+        : folder.subfolders.length > 0;
+    const hasContent = visibleFiles.length > 0 || hasVisibleChildren;
 
     return (
         <div className="select-none">
@@ -127,7 +156,7 @@ function TreeNode({
             {isExpanded && hasContent && (
                 <div className="ml-4 border-l-2 border-gray-200 pl-2 mt-1">
                     {/* Files in this folder */}
-                    {folder.files.map((file) => (
+                    {visibleFiles.map((file) => (
                         <div
                             key={file.path}
                             className="flex items-center gap-2 p-2 hover:bg-blue-50 rounded cursor-pointer"
@@ -187,6 +216,7 @@ function TreeNode({
                             selectedPaths={selectedPaths}
                             onToggleFolder={onToggleFolder}
                             onToggleFile={onToggleFile}
+                            filterQuery={filterQuery}
                         />
                     ))}
                 </div>
@@ -195,7 +225,13 @@ function TreeNode({
     );
 }
 
-export default function FolderTree({ folders, selectedPaths, onToggleFolder, onToggleFile }: FolderTreeProps) {
+export default function FolderTree({
+    folders,
+    selectedPaths,
+    onToggleFolder,
+    onToggleFile,
+    filterQuery,
+}: FolderTreeProps) {
     return (
         <div className="space-y-1">
             {folders.map((folder) => (
@@ -205,6 +241,7 @@ export default function FolderTree({ folders, selectedPaths, onToggleFolder, onT
                     selectedPaths={selectedPaths}
                     onToggleFolder={onToggleFolder}
                     onToggleFile={onToggleFile}
+                    filterQuery={filterQuery}
                 />
             ))}
         </div>
