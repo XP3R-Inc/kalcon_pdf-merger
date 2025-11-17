@@ -1,0 +1,9 @@
+# Require maintainer review for any change
+* @xp3r-inc/invoice-merger-maintainers
+
+# Critical infrastructure stays under maintainer review as well
+.github/* @xp3r-inc/invoice-merger-maintainers
+electron/** @xp3r-inc/invoice-merger-maintainers
+cli/** @xp3r-inc/invoice-merger-maintainers
+
+

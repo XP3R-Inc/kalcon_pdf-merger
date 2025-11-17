@@ -1,24 +1,38 @@
 import type { ForgeConfig } from '@electron-forge/shared-types';
 import { VitePlugin } from '@electron-forge/plugin-vite';
-import { MakerSquirrel } from '@electron-forge/maker-squirrel';
+import { MakerWix } from '@electron-forge/maker-wix';
 
 const config: ForgeConfig = {
     packagerConfig: {
-        name: 'InvoiceMerger',
-        executableName: 'invoice-merger',
+        name: 'Kalcon - Invoice Merger',
+        executableName: 'kalcon_pdf-merger',
         asar: true,
         icon: './assets/icon',
         extraResource: ['./out'],
     },
     rebuildConfig: {},
     makers: [
-        new MakerSquirrel({
-            name: 'InvoiceMerger',
-            setupExe: 'InvoiceMergerSetup.exe',
-            setupIcon: './assets/icon.ico',
-            authors: 'XP3R Inc.',
+        new MakerWix({
+            language: 1033,
+            manufacturer: 'XP3R Inc.',
             description: 'Merge client invoices with expense backup PDFs',
+            shortcutFolderName: 'XP3R',
+            programFilesFolderName: 'Kalcon - Invoice Merger',
+            icon: './assets/icon.ico',
         }),
+    ],
+    publishers: [
+        {
+            name: '@electron-forge/publisher-github',
+            config: {
+                repository: {
+                    owner: 'XP3R-Inc',
+                    name: 'kalcon_pdf-merger',
+                },
+                draft: false,
+                prerelease: false,
+            },
+        },
     ],
     plugins: [
         new VitePlugin({

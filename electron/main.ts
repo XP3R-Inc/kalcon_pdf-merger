@@ -1,6 +1,7 @@
 import { app, BrowserWindow, ipcMain, dialog, protocol } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { updateElectronApp } from 'update-electron-app';
 import {
     ScanRequestSchema,
     GetInvoiceCandidatesRequestSchema,
@@ -17,9 +18,11 @@ import { getUniqueOutputPath } from './lib/naming';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Handle creating/removing shortcuts on Windows when installing/uninstalling.
-// This is handled by electron-squirrel-startup package in production builds
-// In development, this module won't exist and we continue normally
+// Configure auto-updates via update.electronjs.org using GitHub Releases
+updateElectronApp({
+    repo: 'XP3R-Inc/kalcon_pdf-merger',
+    updateInterval: '1 hour',
+});
 
 // Register custom app:// protocol for serving static Next.js export
 protocol.registerSchemesAsPrivileged([
